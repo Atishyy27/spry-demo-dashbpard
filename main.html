@@ -1,0 +1,484 @@
+import React, { useState, useContext, createContext } from 'react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+
+// --- 1. MOCK DATA & CONFIG ---
+const MASTER_CLAIMS_DATA = [
+  { "claimId": "CLM-90123", "patientName": "Sarah Connor", "payer": "Aetna", "claimAmount": 2500.75, "dateOfService": "2025-06-15", "currentStage": "90+ Day Claims (High Priority)", "assignedTo": "Jane Doe", "history": [ { "stage": "90+ Day Claims (High Priority)", "updatedBy": "System", "timestamp": "2025-09-15T09:00:00Z", "remarks": "Claim has aged past 90 days. Immediate follow-up required." }, { "stage": "Payer Denied", "updatedBy": "System", "timestamp": "2025-07-10T14:00:00Z", "remarks": "Denied for medical necessity. Awaiting documentation from provider." }, { "stage": "Clearinghouse Accepted", "updatedBy": "System", "timestamp": "2025-06-16T10:00:00Z", "remarks": "Passed validation." } ] },
+  { "claimId": "CLM-90124", "patientName": "John Smith", "payer": "Cigna", "claimAmount": 450.00, "dateOfService": "2025-08-20", "currentStage": "Unassigned New Rejections", "assignedTo": null, "history": [ { "stage": "Unassigned New Rejections", "updatedBy": "System", "timestamp": "2025-08-21T09:30:00Z", "remarks": "Rejected for invalid patient DOB. Needs correction." } ] },
+  { "claimId": "CLM-90125", "patientName": "Peter Jones", "payer": "United Healthcare", "claimAmount": 1250.00, "dateOfService": "2025-07-25", "currentStage": "31-60 Day Denials", "assignedTo": "John Wick", "history": [ { "stage": "31-60 Day Denials", "updatedBy": "System", "timestamp": "2025-08-26T11:00:00Z", "remarks": "Initial follow-up call made. Payer representative requested 5-7 business days to review." } ] },
+  { "claimId": "CLM-90126", "patientName": "Mary Williams", "payer": "Blue Cross", "claimAmount": 850.50, "dateOfService": "2025-08-10", "currentStage": "31-60 Day Denials", "assignedTo": null, "history": [ { "stage": "31-60 Day Denials", "updatedBy": "System", "timestamp": "2025-09-12T16:00:00Z", "remarks": "Claim aged into 31-60 day bucket. Awaiting assignment." } ] },
+  { "claimId": "CLM-90127", "patientName": "David Brown", "payer": "Humana", "claimAmount": 3200.00, "dateOfService": "2025-08-30", "currentStage": "Unassigned New Rejections", "assignedTo": null, "history": [ { "stage": "Unassigned New Rejections", "updatedBy": "System", "timestamp": "2025-09-01T10:15:00Z", "remarks": "Invalid procedure code. Requires coding review." } ] },
+  { "claimId": "CLM-90128", "patientName": "Susan Davis", "payer": "Aetna", "claimAmount": 780.20, "dateOfService": "2025-06-01", "currentStage": "90+ Day Claims (High Priority)", "assignedTo": "Jane Doe", "history": [ { "stage": "90+ Day Claims (High Priority)", "updatedBy": "System", "timestamp": "2025-09-01T09:00:00Z", "remarks": "Exceeded 90 days. High priority." } ] },
+  { "claimId": "CLM-90129", "patientName": "Robert Miller", "payer": "Cigna", "claimAmount": 150.00, "dateOfService": "2025-08-05", "currentStage": "Escalations from Team", "assignedTo": null, "history": [ { "stage": "Escalations from Team", "updatedBy": "Jane Doe", "timestamp": "2025-08-15T13:45:00Z", "remarks": "Payer unresponsive after three follow-up calls. Need manager intervention to contact provider relations." } ] }
+];
+const TEAM_MEMBERS = ['Jane Doe', 'John Wick'];
+const TEAM_MEMBER_STATUS_OPTIONS = ['Resubmitted', 'Awaiting Payer Response (Follow-up in 10 days)', 'Escalate to Lead', 'Closed - Paid'];
+
+// --- 2. CONTEXT API for Shared State ("The Shared Brain") ---
+const ClaimsContext = createContext();
+
+const ClaimsProvider = ({ children }) => {
+    const [claims, setClaims] = useState(MASTER_CLAIMS_DATA);
+    const [currentUser, setCurrentUser] = useState(null);
+
+    const login = (name, role) => setCurrentUser({ name, role });
+    const logout = () => setCurrentUser(null);
+
+    const updateClaim = (claimId, newStatus, remarks) => {
+        setClaims(prevClaims =>
+            prevClaims.map(claim => {
+                if (claim.claimId === claimId) {
+                    const newHistoryEntry = {
+                        stage: newStatus,
+                        updatedBy: currentUser.name,
+                        timestamp: new Date().toISOString(),
+                        remarks,
+                    };
+                    // For escalation, we change the currentStage bucket and unassign
+                    if (newStatus === 'Escalate to Lead') {
+                        return {
+                            ...claim,
+                            currentStage: 'Escalations from Team',
+                            assignedTo: null, // Unassign when escalated
+                            history: [newHistoryEntry, ...claim.history],
+                        };
+                    }
+                    return {
+                        ...claim,
+                        history: [newHistoryEntry, ...claim.history],
+                    };
+                }
+                return claim;
+            })
+        );
+    };
+    
+    const assignClaims = (claimIds, teamMember) => {
+        setClaims(prevClaims => 
+            prevClaims.map(claim => {
+                if (claimIds.includes(claim.claimId)) {
+                    const newHistoryEntry = {
+                        stage: `Assigned to ${teamMember}`,
+                        updatedBy: currentUser.name,
+                        timestamp: new Date().toISOString(),
+                        remarks: `Assigned from ${claim.currentStage} bucket.`
+                    }
+                    return {
+                        ...claim,
+                        assignedTo: teamMember,
+                        history: [newHistoryEntry, ...claim.history]
+                    }
+                }
+                return claim;
+            })
+        )
+    }
+
+    return (
+        <ClaimsContext.Provider value={{ claims, currentUser, login, logout, updateClaim, assignClaims }}>
+            {children}
+        </ClaimsContext.Provider>
+    );
+};
+
+// --- 3. HELPER & GENERIC COMPONENTS ---
+const calculateDaysOld = (dateOfService) => {
+    const claimDate = new Date(dateOfService);
+    const today = new Date('2025-09-16T12:00:00Z'); // Fixed date for consistent demo
+    const differenceInTime = today.getTime() - claimDate.getTime();
+    return Math.floor(differenceInTime / (1000 * 3600 * 24));
+};
+
+const Header = () => {
+    const { currentUser, logout } = useContext(ClaimsContext);
+    return (
+        <header className="bg-white shadow-md p-4 flex justify-between items-center sticky top-0 z-20">
+            <div className="flex items-center space-x-2">
+                 <svg className="h-8 w-8 text-[#4F46E5]" viewBox="0 0 24 24" fill="currentColor"><path fillRule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25zM12.75 6a.75.75 0 00-1.5 0v6c0 .414.336.75.75.75h4.5a.75.75 0 000-1.5h-3.75V6z" clipRule="evenodd" /></svg>
+                 <h1 className="text-2xl font-bold text-[#4F46E5]">Spry A/R Management</h1>
+            </div>
+            {currentUser && (
+                <div className="flex items-center space-x-4">
+                    <span className="font-semibold text-gray-700">Welcome, {currentUser.name} ({currentUser.role})</span>
+                    <button onClick={logout} className="bg-gray-200 text-gray-600 hover:bg-gray-300 text-sm font-bold py-2 px-4 rounded-lg transition-colors">Logout</button>
+                </div>
+            )}
+        </header>
+    );
+};
+
+// --- 4. MODAL & HISTORY COMPONENTS ---
+const ClaimHistoryLog = ({ history }) => {
+    return (
+        <div className="mt-6">
+            <h3 className="text-lg font-bold text-gray-800 mb-4">Claim History</h3>
+            <div className="relative pl-6 border-l-2 border-gray-300">
+                {history.map((entry, index) => (
+                    <div key={index} className="mb-8">
+                        <div className="absolute -left-4 top-1 w-7 h-7 bg-white border-2 border-[#4F46E5] rounded-full flex items-center justify-center">
+                            <div className="w-4 h-4 bg-[#4F46E5] rounded-full"></div>
+                        </div>
+                        <div className="ml-4 bg-gray-50 p-4 rounded-lg shadow-sm">
+                            <p className="font-bold text-md text-[#4F46E5]">{entry.stage}</p>
+                            <p className="text-gray-700 mt-1">"{entry.remarks}"</p>
+                            <div className="text-xs text-gray-500 mt-2 flex items-center justify-between">
+                                <span className="flex items-center">
+                                    {entry.updatedBy === 'System' ? '🤖' : '👤'}
+                                    <span className="ml-1.5">by {entry.updatedBy}</span>
+                                </span>
+                                <span>{new Date(entry.timestamp).toLocaleString()}</span>
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+const UpdateStatusModal = ({ claim, onClose }) => {
+    const { currentUser, updateClaim } = useContext(ClaimsContext);
+    const [newStatus, setNewStatus] = useState('');
+    const [remarks, setRemarks] = useState('');
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        if (!remarks || !newStatus) {
+            alert("Please select a new status and add remarks.");
+            return;
+        }
+        updateClaim(claim.claimId, newStatus, remarks);
+        onClose();
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+                <div className="flex justify-between items-start">
+                    <h2 className="text-2xl font-bold mb-2">View & Update Claim: <span className="text-[#4F46E5]">{claim.claimId}</span></h2>
+                    <button onClick={onClose} className="text-gray-500 hover:text-gray-800 text-2xl font-bold">&times;</button>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-4">
+                    {/* Left side: Update form */}
+                    <div>
+                        <form onSubmit={handleSubmit}>
+                            <h3 className="text-lg font-bold text-gray-800 mb-4">Take Action</h3>
+                            <div className="space-y-4 bg-gray-50 p-4 rounded-lg">
+                                <div>
+                                    <label htmlFor="newStatus" className="block text-sm font-medium text-gray-700">Set New Status</label>
+                                    <select id="newStatus" value={newStatus} onChange={(e) => setNewStatus(e.target.value)} className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-[#4F46E5] focus:border-[#4F46E5] sm:text-sm rounded-md">
+                                        <option value="">Select an action...</option>
+                                        {TEAM_MEMBER_STATUS_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label htmlFor="remarks" className="block text-sm font-medium text-gray-700">Add Remarks (Required)</label>
+                                    <textarea id="remarks" rows="5" value={remarks} onChange={(e) => setRemarks(e.target.value)} className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-[#4F46E5]" placeholder="Explain the action taken..."></textarea>
+                                </div>
+                                <button type="submit" className="w-full bg-[#4F46E5] text-white font-bold py-3 px-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Submit Update</button>
+                            </div>
+                        </form>
+                    </div>
+
+                    {/* Right side: History log */}
+                    <div>
+                        <ClaimHistoryLog history={claim.history} />
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+// --- 5. TEAM MEMBER COMPONENTS ---
+const TeamMemberDashboard = () => {
+    const { claims, currentUser } = useContext(ClaimsContext);
+    const [selectedClaim, setSelectedClaim] = useState(null);
+    
+    const myClaims = claims.filter(claim => claim.assignedTo === currentUser.name);
+
+    return (
+        <main className="p-8">
+            <h1 className="text-3xl font-bold text-gray-800 mb-6">My Work Queue</h1>
+            <div className="space-y-4">
+                {myClaims.length > 0 ? (
+                    myClaims.map(claim => (
+                        <div key={claim.claimId} className="bg-white p-4 rounded-lg shadow-md flex justify-between items-center">
+                           <div className="flex-1 grid grid-cols-2 md:grid-cols-5 gap-4 items-center">
+                                <p><span className="font-bold text-[#4F46E5]">{claim.claimId}</span></p>
+                                <p className="text-gray-600">{claim.patientName}</p>
+                                <p className="text-gray-500 text-sm">{claim.payer}</p>
+                                <p className="font-semibold text-lg">${claim.claimAmount.toLocaleString()}</p>
+                                <p className="bg-red-100 text-red-700 text-xs font-semibold px-2 py-1 rounded-full w-fit">{calculateDaysOld(claim.dateOfService)} days old</p>
+                            </div>
+                            <button onClick={() => setSelectedClaim(claim)} className="ml-4 bg-[#4F46E5] text-white font-semibold py-2 px-4 rounded-lg hover:bg-indigo-700 transition-colors">View & Update</button>
+                        </div>
+                    ))
+                ) : (
+                    <p className="text-gray-500 text-center py-10 bg-white rounded-lg shadow-md">Your work queue is empty. Great job!</p>
+                )}
+            </div>
+            {selectedClaim && <UpdateStatusModal claim={selectedClaim} onClose={() => setSelectedClaim(null)} />}
+        </main>
+    );
+};
+
+
+// --- 6. TEAM LEADER COMPONENTS ---
+const TeamLeaderDashboard = () => {
+    const { claims } = useContext(ClaimsContext);
+    const [viewingBucket, setViewingBucket] = useState(null);
+
+    const buckets = {
+        'Unassigned New Rejections': claims.filter(c => c.currentStage === 'Unassigned New Rejections').length,
+        '31-60 Day Denials': claims.filter(c => c.currentStage === '31-60 Day Denials').length,
+        '90+ Day Claims (HIGH PRIORITY)': claims.filter(c => c.currentStage === '90+ Day Claims (High Priority)').length,
+        'Escalations from Team': claims.filter(c => c.currentStage === 'Escalations from Team').length,
+    };
+    
+    if (viewingBucket) {
+        return <ClaimListView bucketName={viewingBucket} onBack={() => setViewingBucket(null)} />;
+    }
+
+    return (
+        <main className="p-8">
+            <h1 className="text-3xl font-bold text-gray-800 mb-6">Supervisor: Mission Control</h1>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                {Object.entries(buckets).map(([bucketName, count]) => (
+                    <div key={bucketName} onClick={() => setViewingBucket(bucketName)} className={`p-6 rounded-xl shadow-lg cursor-pointer transition-transform transform hover:scale-105 ${bucketName.includes('HIGH PRIORITY') ? 'bg-red-100 border-2 border-red-500' : 'bg-white'}`}>
+                        <h2 className={`text-lg font-bold ${bucketName.includes('HIGH PRIORITY') ? 'text-red-700' : 'text-gray-700'}`}>{bucketName}</h2>
+                        <p className={`text-5xl font-extrabold mt-2 ${bucketName.includes('HIGH PRIORITY') ? 'text-red-600' : 'text-[#4F46E5]'}`}>{count}</p>
+                        <p className={`text-sm mt-1 ${bucketName.includes('HIGH PRIORITY') ? 'text-red-500' : 'text-gray-500'}`}>{count === 1 ? 'claim' : 'claims'} awaiting action</p>
+                    </div>
+                ))}
+            </div>
+        </main>
+    );
+};
+
+const ClaimListView = ({ bucketName, onBack }) => {
+    const { claims, assignClaims } = useContext(ClaimsContext);
+    const [selectedClaims, setSelectedClaims] = useState([]);
+    const [showAssignModal, setShowAssignModal] = useState(false);
+
+    const claimsInBucket = claims.filter(c => c.currentStage === bucketName);
+
+    const handleSelectClaim = (claimId) => {
+        setSelectedClaims(prev => 
+            prev.includes(claimId) ? prev.filter(id => id !== claimId) : [...prev, claimId]
+        );
+    };
+
+    const handleAssign = (teamMember) => {
+        assignClaims(selectedClaims, teamMember);
+        setShowAssignModal(false);
+        setSelectedClaims([]);
+    }
+
+    return (
+        <main className="p-8">
+             <div className="flex justify-between items-center mb-6">
+                <div>
+                    <button onClick={onBack} className="text-[#4F46E5] font-semibold mb-2">&larr; Back to Mission Control</button>
+                    <h1 className="text-3xl font-bold text-gray-800">{bucketName}</h1>
+                </div>
+                {selectedClaims.length > 0 && (
+                    <button onClick={() => setShowAssignModal(true)} className="bg-[#4F46E5] text-white font-bold py-2 px-6 rounded-lg hover:bg-indigo-700">Assign Selected ({selectedClaims.length})</button>
+                )}
+            </div>
+            <div className="bg-white rounded-lg shadow-md overflow-hidden">
+                <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                        <tr>
+                            <th className="px-4 py-3 text-left w-12"><input type="checkbox" disabled /></th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Claim ID</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Patient</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Payer</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Days Old</th>
+                        </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                        {claimsInBucket.map(claim => (
+                            <tr key={claim.claimId} className={selectedClaims.includes(claim.claimId) ? 'bg-indigo-50' : ''}>
+                                <td className="px-4 py-4"><input type="checkbox" checked={selectedClaims.includes(claim.claimId)} onChange={() => handleSelectClaim(claim.claimId)} /></td>
+                                <td className="px-6 py-4 whitespace-nowrap font-medium text-[#4F46E5]">{claim.claimId}</td>
+                                <td className="px-6 py-4 whitespace-nowrap">{claim.patientName}</td>
+                                <td className="px-6 py-4 whitespace-nowrap text-gray-500">{claim.payer}</td>
+                                <td className="px-6 py-4 whitespace-nowrap font-semibold">${claim.claimAmount.toLocaleString()}</td>
+                                <td className="px-6 py-4 whitespace-nowrap">{calculateDaysOld(claim.dateOfService)}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+                 {claimsInBucket.length === 0 && <p className="text-center text-gray-500 p-8">This bucket is empty.</p>}
+            </div>
+            {showAssignModal && <AssignModal onAssign={handleAssign} onClose={() => setShowAssignModal(false)} />}
+        </main>
+    )
+}
+
+const AssignModal = ({ onAssign, onClose }) => {
+    const [selectedMember, setSelectedMember] = useState(TEAM_MEMBERS[0]);
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white p-6 rounded-lg shadow-xl">
+                <h3 className="text-lg font-bold mb-4">Assign to Team Member</h3>
+                <select value={selectedMember} onChange={e => setSelectedMember(e.target.value)} className="w-full p-2 border border-gray-300 rounded-md mb-4">
+                    {TEAM_MEMBERS.map(member => <option key={member} value={member}>{member}</option>)}
+                </select>
+                <div className="flex justify-end space-x-2">
+                    <button onClick={onClose} className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md">Cancel</button>
+                    <button onClick={() => onAssign(selectedMember)} className="bg-[#4F46E5] text-white px-4 py-2 rounded-md">Assign</button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+// --- 7. CLINIC OWNER COMPONENTS ---
+const ClinicOwnerDashboard = () => {
+    const { claims } = useContext(ClaimsContext);
+
+    // KPI Calculations
+    const totalAR = claims.reduce((acc, claim) => acc + claim.claimAmount, 0);
+    const totalDays = claims.reduce((acc, claim) => acc + calculateDaysOld(claim.dateOfService), 0);
+    const avgDaysToPay = claims.length > 0 ? (totalDays / claims.length).toFixed(1) : 0;
+    // Mocked "Collections This Month" for demo purposes
+    const collectionsThisMonth = totalAR * 0.45; 
+
+    // Chart Data Calculation
+    const arAgingData = [
+        { name: '0-30 Days', value: 0 },
+        { name: '31-60 Days', value: 0 },
+        { name: '61-90 Days', value: 0 },
+        { name: '90+ Days', value: 0 },
+    ];
+    claims.forEach(claim => {
+        const daysOld = calculateDaysOld(claim.dateOfService);
+        if (daysOld <= 30) arAgingData[0].value += claim.claimAmount;
+        else if (daysOld <= 60) arAgingData[1].value += claim.claimAmount;
+        else if (daysOld <= 90) arAgingData[2].value += claim.claimAmount;
+        else arAgingData[3].value += claim.claimAmount;
+    });
+
+    return (
+        <main className="p-8">
+            <h1 className="text-3xl font-bold text-gray-800 mb-6">Financial Health Overview</h1>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div className="bg-white p-6 rounded-xl shadow-lg">
+                    <p className="text-sm text-gray-500">Total Outstanding A/R</p>
+                    <p className="text-4xl font-bold text-[#4F46E5]">${totalAR.toLocaleString(undefined, {minimumFractionDigits: 2})}</p>
+                </div>
+                <div className="bg-white p-6 rounded-xl shadow-lg">
+                    <p className="text-sm text-gray-500">Average Days to Get Paid</p>
+                    <p className="text-4xl font-bold text-[#4F46E5]">{avgDaysToPay}</p>
+                </div>
+                <div className="bg-white p-6 rounded-xl shadow-lg">
+                    <p className="text-sm text-gray-500">Collections This Month</p>
+                    <p className="text-4xl font-bold text-[#4F46E5]">${collectionsThisMonth.toLocaleString(undefined, {minimumFractionDigits: 2})}</p>
+                </div>
+            </div>
+
+            <div className="bg-white p-6 rounded-xl shadow-lg">
+                <h2 className="text-xl font-bold text-gray-800 mb-4">A/R Aging</h2>
+                <div style={{ width: '100%', height: 400 }}>
+                    <ResponsiveContainer>
+                        <BarChart data={arAgingData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="name" />
+                            <YAxis tickFormatter={(value) => `$${(value/1000)}k`} />
+                            <Tooltip formatter={(value) => `$${value.toLocaleString()}`} />
+                            <Legend />
+                            <Bar dataKey="value" fill="#4F46E5" name="A/R Value" />
+                        </BarChart>
+                    </ResponsiveContainer>
+                </div>
+            </div>
+        </main>
+    );
+};
+
+
+// --- 8. LOGIN & MAIN APP COMPONENT ---
+const LoginScreen = () => {
+    const [name, setName] = useState('');
+    const [role, setRole] = useState('');
+    const { login } = useContext(ClaimsContext);
+
+    const handleLogin = (e) => {
+        e.preventDefault();
+        if (name && role) {
+            login(name, role);
+        } else {
+            alert('Please enter your name and select a role.');
+        }
+    };
+
+    return (
+        <div className="flex items-center justify-center min-h-screen bg-gray-100">
+            <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md">
+                <div className="text-center mb-8">
+                    <svg className="mx-auto h-12 w-auto text-[#4F46E5]" viewBox="0 0 24 24" fill="currentColor"><path fillRule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25zM12.75 6a.75.75 0 00-1.5 0v6c0 .414.336.75.75.75h4.5a.75.75 0 000-1.5h-3.75V6z" clipRule="evenodd" /></svg>
+                    <h1 className="text-3xl font-bold mt-2">Spry A/R Login</h1>
+                </div>
+                <form onSubmit={handleLogin} className="space-y-6">
+                    <div>
+                        <label htmlFor="fullName" className="block text-sm font-medium text-gray-700">Full Name</label>
+                        <input type="text" id="fullName" value={name} onChange={(e) => setName(e.target.value)} className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-[#4F46E5]" placeholder="e.g., Jane Doe" />
+                    </div>
+                    <div>
+                        <label htmlFor="role" className="block text-sm font-medium text-gray-700">Role</label>
+                        <select id="role" value={role} onChange={(e) => setRole(e.target.value)} className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-[#4F46E5] focus:border-[#4F46E5] sm:text-sm rounded-md">
+                            <option value="">Select your role...</option>
+                            <option value="Team Member">Team Member</option>
+                            <option value="Team Leader">Team Leader</option>
+                            <option value="Clinic Owner">Clinic Owner</option>
+                        </select>
+                    </div>
+                    <button type="submit" className="w-full bg-[#4F46E5] text-white font-bold py-3 px-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Login</button>
+                </form>
+            </div>
+        </div>
+    );
+};
+
+function App() {
+    const { currentUser } = useContext(ClaimsContext);
+
+    const renderDashboard = () => {
+        if (!currentUser) return null;
+        switch (currentUser.role) {
+            case 'Team Member': return <TeamMemberDashboard />;
+            case 'Team Leader': return <TeamLeaderDashboard />;
+            case 'Clinic Owner': return <ClinicOwnerDashboard />;
+            default: return null;
+        }
+    };
+    
+    return (
+        <div className="bg-gray-100 min-h-screen">
+            {!currentUser ? (
+                <LoginScreen />
+            ) : (
+                <>
+                    <Header />
+                    {renderDashboard()}
+                </>
+            )}
+        </div>
+    );
+}
+
+// Wrap the main App in the provider
+export default function ProvidedApp() {
+    return (
+        <ClaimsProvider>
+            <App />
+        </ClaimsProvider>
+    );
+}
